@@ -315,49 +315,74 @@ static HWND FindMainWindow(void)
 }
 
 /* ---------------------------- 确认框（原生 TaskDialog） ----------------------------
- * 外观与 AHK 原型完全一致：信息图标 + 脚注灰条 + 「是(Y)」/「否(N)」按钮。
- * 它依赖 comctl32 v6，所以 exe 必须带正确嵌入的 manifest —— 见仓库里的
- * app.manifest 与 app.rc（用 rc.exe 编成 .res 后一起链接）。
- * 曾经因为清单没进 exe，加载期报"无法定位序数 345"，这一步不能再省。
+ * 外观与 AHK 原型一致：信息图标 + 脚注灰条 + 「是(Y)」/「否(N)」按钮。
+ * 依赖 comctl32 v6，所以 exe 必须带正确嵌入的 manifest（见 app.manifest / app.rc）。
  *
- * 语义：监听期间点了主窗口 X -> 弹框；20 秒内不操作 -> 自动执行【是】（清理并退出）；
- *       中途可以选【否】/按 Esc/点标题栏 X 拦下来，保持 VMware 原样。
+ * 为什么不用 TDF_CALLBACK_TIMER：实测 TDN_TIMER 回调一次都没触发 —— 脚注不刷新、
+ * 超时也不动作，对话框会一直挂着。改为开一个后台线程，到点直接给对话框发
+ * TDM_CLICK_BUTTON(IDYES)，完全不依赖回调机制。
+ *
+ * 语义：20 秒内不操作 -> 自动执行【是】；中途可选【否】/Esc/点标题栏 X 拦下。
  * ------------------------------------------------------------------------------- */
 
+/* 在自身进程里找当前可见的 TaskDialog 窗口（类名 #32770） */
 typedef struct {
-    DWORD limit;       /* 倒计时总时长（毫秒） */
-    DWORD lastShown;   /* 上次显示的剩余秒数，只在变化时刷新脚注，减少重绘 */
-} DlgData;
+    DWORD pid;
+    HWND  hwnd;
+} FINDDLG;
 
-static HRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, LONG_PTR ref)
+static BOOL CALLBACK FindDlgProc(HWND hwnd, LPARAM lp)
 {
-    DlgData* d = (DlgData*)ref;
+    FINDDLG* f = (FINDDLG*)lp;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != f->pid || !IsWindowVisible(hwnd)) return TRUE;
 
-    if (msg == TDN_TIMER) {
-        DWORD elapsed = (DWORD)lp;                     /* 对话框打开至今的毫秒数 */
-        DWORD remain  = (elapsed < d->limit) ? d->limit - elapsed : 0;
-        DWORD secs    = (remain + 999) / 1000;
-
-        if (secs != d->lastShown) {                    /* 每秒才更新一次脚注 */
-            d->lastShown = secs;
-            wchar_t buf[128];
-            swprintf_s(buf, 128, L"剩余 %lu 秒，超时自动选择【是】", secs);
-            SendMessageW(h, TDM_SET_ELEMENT_TEXT, TDE_FOOTER, (LPARAM)buf);
-        }
-
-        if (elapsed >= d->limit)
-            SendMessageW(h, TDM_CLICK_BUTTON, IDYES, 0);   /* 超时 = 按【是】执行清理 */
-        return S_OK;
+    wchar_t cls[64];
+    GetClassNameW(hwnd, cls, 64);
+    if (_wcsicmp(cls, L"#32770") == 0) {
+        f->hwnd = hwnd;
+        return FALSE;
     }
-    return S_FALSE;
+    return TRUE;
+}
+
+static HWND FindTaskDialogWindow(void)
+{
+    FINDDLG f;
+    f.pid  = GetCurrentProcessId();
+    f.hwnd = NULL;
+    EnumWindows(FindDlgProc, (LPARAM)&f);
+    return f.hwnd;
+}
+
+/* 倒计时线程：先等对话框出现，到点给它发【是】 */
+static DWORD WINAPI DlgTimerThread(LPVOID param)
+{
+    (void)param;
+
+    HWND dlg = NULL;
+    for (int i = 0; i < 50 && !dlg; i++) {       /* 最多 5 秒等对话框出现 */
+        Sleep(100);
+        dlg = FindTaskDialogWindow();
+    }
+    if (!dlg) return 0;
+
+    int ticks = (int)(kDialogTimeoutMs / 100);
+    for (int i = 0; i < ticks; i++) {
+        Sleep(100);
+        if (!IsWindow(dlg)) return 0;            /* 用户已经作答，线程自行退出 */
+    }
+    if (IsWindow(dlg))
+        SendMessageW(dlg, TDM_CLICK_BUTTON, IDYES, 0);   /* 超时 = 按【是】执行清理 */
+    return 0;
 }
 
 /* 返回 IDYES / IDNO */
 static int AskExit(void)
 {
-    DlgData d;
-    d.limit     = kDialogTimeoutMs;
-    d.lastShown = 0xFFFFFFFF;      /* 强制第一次进入时刷新 */
+    HANDLE th = CreateThread(NULL, 0, DlgTimerThread, NULL, 0, NULL);
+    if (th) CloseHandle(th);
 
     TASKDIALOGCONFIG cfg;
     ZeroMemory(&cfg, sizeof(cfg));
@@ -367,20 +392,18 @@ static int AskExit(void)
     cfg.pszMainInstruction = L"VMware 主窗口已关闭，要完全退出吗？";
     cfg.pszContent         = L"【是】 结束 VMware 全部进程（含运行中的虚拟机），并停止 4 个后台服务。\n"
                              L"【否】 保持现状：托盘图标与后台服务继续运行，与原生行为一致。";
-    cfg.pszFooter          = L"剩余 20 秒，超时自动选择【是】";
+    cfg.pszFooter          = L"20 秒内不操作，将自动选择【是】。";
     cfg.pszMainIcon        = TD_INFORMATION_ICON;
     cfg.dwCommonButtons    = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON;
-    cfg.nDefaultButton     = IDNO;                 /* 焦点默认在【否】，误按回车不会误清 */
-    cfg.pfCallback         = DlgProc;
-    cfg.lpCallbackData     = (LONG_PTR)&d;
-    cfg.dwFlags            = TDF_CALLBACK_TIMER |
-                             TDF_ALLOW_DIALOG_CANCELLATION |   /* Esc / 标题栏 X 都按【否】 */
+    cfg.nDefaultButton     = IDNO;           /* 焦点默认在【否】，误按回车不会误清 */
+    cfg.dwFlags            = TDF_ALLOW_DIALOG_CANCELLATION |   /* Esc / 标题栏 X 按【否】 */
                              TDF_SIZE_TO_CONTENT;
 
-    int btn = IDNO;
-    if (FAILED(TaskDialogIndirect(&cfg, &btn, NULL, NULL)) || btn == 0)
-        btn = IDNO;            /* 对话框本身起不来时按【否】处理，绝不误清 */
-    return btn;
+    int btn = 0;
+    HRESULT hr = TaskDialogIndirect(&cfg, &btn, NULL, NULL);
+    if (FAILED(hr) || btn == 0)
+        return IDNO;                          /* 对话框起不来就按【否】，绝不误清 */
+    return (btn == IDYES) ? IDYES : IDNO;
 }
 
 /* ---------------------------- 收尾 ---------------------------- */
