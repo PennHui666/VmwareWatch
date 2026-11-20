@@ -1,11 +1,12 @@
 # 在线编译：推到 GitHub 后，Actions 在 windows-latest 虚拟机里用 MSVC 编出 exe，
-# 编译完在该次运行的 Artifacts 里下载 vmware_launcher.exe。
+# 编译完在该次运行的 Artifacts 里下载 VmwareWatch.exe。
 #
 # 用法：
-#   1. 新建一个 GitHub 仓库（私有即可），把 vmware_watch.c 放到根目录；
-#   2. 把本文件放到 .github/workflows/build-exe.yml；
-#   3. 仓库 Actions 标签页手动触发（或 push 后自动跑）；
-#   4. 运行结束 -> Artifacts -> vmware-launcher-exe 下载。
+#   1. 仓库 Actions 标签页手动触发（或 push 到 main 自动跑）；
+#   2. 运行结束 -> Artifacts -> VmwareWatch-exe 下载。
+#
+# 注意：不同 runner 镜像里 Visual Studio 的安装路径（2022\Enterprise / 2022\Community /
+# 2022\Professional ...）会变，所以这里不写死路径，改用 vswhere 现场发现。
 
 name: build-exe
 
@@ -20,10 +21,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 定位 MSVC 环境
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe 不存在: $vswhere" }
+
+          $vsPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vsPath) { throw "找不到带 C++ 工具链的 Visual Studio" }
+
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat 不存在: $vcvars" }
+
+          Write-Host "Visual Studio: $vsPath"
+          Write-Host "vcvars64: $vcvars"
+          "VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: MSVC 编译
         shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          call "%VCVARS%"
           cl /O2 /MT /DUNICODE /D_UNICODE /W3 vmware_watch.c /Fe:VmwareWatch.exe /link comctl32.lib advapi32.lib shell32.lib user32.lib shlwapi.lib /manifestdependency:"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
 
       - name: 上传产物

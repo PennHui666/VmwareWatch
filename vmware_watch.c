@@ -26,6 +26,7 @@
 #define UNICODE
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0601   /* TaskDialog / TaskDialogIndirect 需要 Vista+ */
 
 #include <windows.h>
 #include <commctrl.h>
