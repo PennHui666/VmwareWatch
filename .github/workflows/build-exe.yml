@@ -1,0 +1,33 @@
+# 在线编译：推到 GitHub 后，Actions 在 windows-latest 虚拟机里用 MSVC 编出 exe，
+# 编译完在该次运行的 Artifacts 里下载 vmware_launcher.exe。
+#
+# 用法：
+#   1. 新建一个 GitHub 仓库（私有即可），把 vmware_watch.c 放到根目录；
+#   2. 把本文件放到 .github/workflows/build-exe.yml；
+#   3. 仓库 Actions 标签页手动触发（或 push 后自动跑）；
+#   4. 运行结束 -> Artifacts -> vmware-launcher-exe 下载。
+
+name: build-exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: MSVC 编译
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cl /O2 /MT /DUNICODE /D_UNICODE /W3 vmware_watch.c /Fe:VmwareWatch.exe /link comctl32.lib advapi32.lib shell32.lib user32.lib shlwapi.lib /manifestdependency:"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: VmwareWatch-exe
+          path: VmwareWatch.exe
