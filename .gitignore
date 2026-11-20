@@ -11,6 +11,10 @@
 *.log
 log/
 
+# 打包分发（含 VMware 安装包，体积大，不进仓库）
+dist/
+*.zip
+
 # 编辑器/系统临时
 .vs/
 .vscode/
