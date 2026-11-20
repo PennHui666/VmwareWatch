@@ -11,15 +11,15 @@
  *     x86_64-w64-mingw32-gcc vmware_watch.c -O2 -mwindows -static ^
  *       -o VmwareWatch.exe -lcomctl32 -ladvapi32 -lshell32 -luser32 -lshlwapi
  *
- *   MSVC (Developer Command Prompt)：
- *     cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE /W3 vmware_watch.c /Fe:VmwareWatch.exe ^
- *       /link advapi32.lib shell32.lib user32.lib gdi32.lib shlwapi.lib
+ *   MSVC (Developer Command Prompt) —— 必须先把 manifest 编成资源再链接：
+ *     rc /nologo /fo app.res app.rc
+ *     cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE /W3 vmware_watch.c app.res /Fe:VmwareWatch.exe /link ^
+ *       /MANIFEST:NO advapi32.lib comctl32.lib shell32.lib user32.lib gdi32.lib shlwapi.lib
  *
- *   MinGW-w64:
- *     x86_64-w64-mingw32-gcc vmware_watch.c -O2 -mwindows -static -o VmwareWatch.exe ^
- *       -ladvapi32 -lshell32 -luser32 -lgdi32 -lshlwapi
+ *   注意 manifest 不能省：TaskDialogIndirect 是 comctl32 v6 的序号导出，
+ *   没有清单会在加载期报"无法定位序数 345"。
  *
- *   两者都不再需要 comctl32 / manifest：确认框是纯 user32 + gdi32 自绘窗口。
+ *   MinGW-w64：同样需要把 app.manifest 通过 .rc 编进 exe，否则 TaskDialog 不可用。
  *
  * 说明：日志写到 exe 同级目录的 log\ 下，文件名带启动时间戳（每次启动一个文件）；
  *       目录不可写时回退到 %TEMP%。
@@ -40,6 +40,7 @@
 /* WIN32_LEAN_AND_MEAN 会裁掉 shellapi.h，而 ShellExecuteExW 在那里，必须显式包含 */
 #include <windows.h>
 #include <shellapi.h>
+#include <commctrl.h>
 #include <tlhelp32.h>
 #include <shlwapi.h>
 #include <stdio.h>
@@ -313,200 +314,73 @@ static HWND FindMainWindow(void)
     return hwnd;
 }
 
-/* ------------------- 确认框（纯 user32 自绘，不依赖 comctl32） -------------------
- * 原先用 TaskDialogIndirect：它是 comctl32 v6 的"仅序号导出"(ordinal 345)，
- * 必须先正确嵌入 manifest 才能加载。实测线上 exe 根本没带上 manifest，
- * 加载期就报"无法定位序数 345 于动态链接库 xxx.exe 上"。
- * 这里改成自己 CreateWindow + 定时器实现，零额外依赖，行为完全可控。
- * ------------------------------------------------------------------------- */
+/* ---------------------------- 确认框（原生 TaskDialog） ----------------------------
+ * 外观与 AHK 原型完全一致：信息图标 + 脚注灰条 + 「是(Y)」/「否(N)」按钮。
+ * 它依赖 comctl32 v6，所以 exe 必须带正确嵌入的 manifest —— 见仓库里的
+ * app.manifest 与 app.rc（用 rc.exe 编成 .res 后一起链接）。
+ * 曾经因为清单没进 exe，加载期报"无法定位序数 345"，这一步不能再省。
+ *
+ * 语义：监听期间点了主窗口 X -> 弹框；20 秒内不操作 -> 自动执行【是】（清理并退出）；
+ *       中途可以选【否】/按 Esc/点标题栏 X 拦下来，保持 VMware 原样。
+ * ------------------------------------------------------------------------------- */
 
-#define DLG_CX        460          /* 客户区基准尺寸（按 96 DPI 设计，运行时按屏幕 DPI 缩放） */
-#define DLG_CY        196
-#define DLG_ID_YES    1001
-#define DLG_ID_NO     1002
-#define DLG_ID_TIMER  1
+typedef struct {
+    DWORD limit;       /* 倒计时总时长（毫秒） */
+    DWORD lastShown;   /* 上次显示的剩余秒数，只在变化时刷新脚注，减少重绘 */
+} DlgData;
 
-static HWND  gDlgWnd       = NULL;
-static HWND  gDlgCounter   = NULL;
-static int   gDlgResult    = IDNO;
-static DWORD gDlgStart     = 0;
-static DWORD gDlgLimit     = 0;
-static HFONT gDlgFontTitle = NULL;
-static HFONT gDlgFontBody  = NULL;
-
-static int ScreenDpi(void)
+static HRESULT CALLBACK DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp, LONG_PTR ref)
 {
-    HDC dc = GetDC(NULL);
-    int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
-    if (dc) ReleaseDC(NULL, dc);
-    return dpi ? dpi : 96;
-}
+    DlgData* d = (DlgData*)ref;
 
-/* 按屏幕 DPI 缩放一个基准像素值 */
-static int Scaled(int v)
-{
-    return MulDiv(v, ScreenDpi(), 96);
-}
+    if (msg == TDN_TIMER) {
+        DWORD elapsed = (DWORD)lp;                     /* 对话框打开至今的毫秒数 */
+        DWORD remain  = (elapsed < d->limit) ? d->limit - elapsed : 0;
+        DWORD secs    = (remain + 999) / 1000;
 
-static HFONT MakeFont(int pt, int weight)
-{
-    LOGFONTW lf;
-    ZeroMemory(&lf, sizeof(lf));
-    lf.lfHeight  = -MulDiv(pt, ScreenDpi(), 72);
-    lf.lfWeight  = weight;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    wcscpy_s(lf.lfFaceName, LF_FACESIZE, L"Microsoft YaHei UI");
-    return CreateFontIndirectW(&lf);
-}
+        if (secs != d->lastShown) {                    /* 每秒才更新一次脚注 */
+            d->lastShown = secs;
+            wchar_t buf[128];
+            swprintf_s(buf, 128, L"剩余 %lu 秒，超时自动选择【是】", secs);
+            SendMessageW(h, TDM_SET_ELEMENT_TEXT, TDE_FOOTER, (LPARAM)buf);
+        }
 
-static void DlgFinish(int result)
-{
-    gDlgResult = result;
-    if (gDlgWnd) DestroyWindow(gDlgWnd);
-}
-
-static LRESULT CALLBACK DlgWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
-{
-    switch (msg) {
-    case WM_CREATE: {
-        HINSTANCE hi = (HINSTANCE)GetWindowLongPtrW(h, GWLP_HINSTANCE);
-
-        gDlgFontTitle = MakeFont(12, FW_SEMIBOLD);
-        gDlgFontBody  = MakeFont(9,  FW_NORMAL);
-
-        HWND t = CreateWindowExW(0, L"STATIC",
-            L"VMware 主窗口已关闭，要完全退出吗？",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            Scaled(24), Scaled(26), Scaled(412), Scaled(26), h, NULL, hi, NULL);
-        SendMessageW(t, WM_SETFONT, (WPARAM)gDlgFontTitle, TRUE);
-
-        HWND b = CreateWindowExW(0, L"STATIC",
-            L"【是】 结束 VMware 全部进程（含运行中的虚拟机），并停止 4 个后台服务。\r\n"
-            L"【否】 保持现状：托盘图标与后台服务继续运行，与原生行为一致。",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            Scaled(24), Scaled(62), Scaled(412), Scaled(46), h, NULL, hi, NULL);
-        SendMessageW(b, WM_SETFONT, (WPARAM)gDlgFontBody, TRUE);
-
-        gDlgCounter = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            Scaled(24), Scaled(118), Scaled(412), Scaled(20), h, NULL, hi, NULL);
-        SendMessageW(gDlgCounter, WM_SETFONT, (WPARAM)gDlgFontBody, TRUE);
-
-        HWND yes = CreateWindowExW(0, L"BUTTON", L"是",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            Scaled(244), Scaled(152), Scaled(88), Scaled(30), h, (HMENU)DLG_ID_YES, hi, NULL);
-        HWND no  = CreateWindowExW(0, L"BUTTON", L"否",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            Scaled(340), Scaled(152), Scaled(88), Scaled(30), h, (HMENU)DLG_ID_NO, hi, NULL);
-        SendMessageW(yes, WM_SETFONT, (WPARAM)gDlgFontBody, TRUE);
-        SendMessageW(no,  WM_SETFONT, (WPARAM)gDlgFontBody, TRUE);
-
-        SetFocus(no);   /* 默认焦点在【否】，误按回车也不会误清 */
-        return 0;
+        if (elapsed >= d->limit)
+            SendMessageW(h, TDM_CLICK_BUTTON, IDYES, 0);   /* 超时 = 按【是】执行清理 */
+        return S_OK;
     }
-
-    case WM_TIMER: {
-        DWORD elapsed = GetTickCount() - gDlgStart;
-        DWORD remain  = (elapsed < gDlgLimit) ? gDlgLimit - elapsed : 0;
-        wchar_t buf[128];
-        swprintf_s(buf, 128, L"剩余 %lu 秒，超时自动选择【否】", (remain + 999) / 1000);
-        SetWindowTextW(gDlgCounter, buf);
-        if (elapsed >= gDlgLimit) DlgFinish(IDNO);
-        return 0;
-    }
-
-    case WM_COMMAND:
-        if (LOWORD(wp) == DLG_ID_YES) { DlgFinish(IDYES); return 0; }
-        if (LOWORD(wp) == DLG_ID_NO)  { DlgFinish(IDNO);  return 0; }
-        break;
-
-    case WM_KEYDOWN:
-        if (wp == VK_ESCAPE) { DlgFinish(IDNO); return 0; }
-        break;
-
-    case WM_CTLCOLORSTATIC: {
-        HDC dc = (HDC)wp;
-        SetBkMode(dc, TRANSPARENT);
-        if ((HWND)lp == gDlgCounter) SetTextColor(dc, RGB(0x66, 0x66, 0x66));
-        return (LRESULT)GetSysColorBrush(COLOR_3DFACE);
-    }
-
-    case WM_CLOSE:      /* 点标题栏 X 也按【否】处理，绝不误清 */
-        DlgFinish(IDNO);
-        return 0;
-
-    case WM_DESTROY:
-        KillTimer(h, DLG_ID_TIMER);
-        if (gDlgFontTitle) { DeleteObject(gDlgFontTitle); gDlgFontTitle = NULL; }
-        if (gDlgFontBody)  { DeleteObject(gDlgFontBody);  gDlgFontBody  = NULL; }
-        gDlgWnd = NULL;
-        PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcW(h, msg, wp, lp);
+    return S_FALSE;
 }
 
-/* 返回 IDYES / IDNO（任何异常都返回 IDNO：宁可不动，也不误清） */
+/* 返回 IDYES / IDNO */
 static int AskExit(void)
 {
-    static BOOL registered = FALSE;
-    if (!registered) {
-        WNDCLASSEXW wc;
-        ZeroMemory(&wc, sizeof(wc));
-        wc.cbSize        = sizeof(wc);
-        wc.lpfnWndProc   = DlgWndProc;
-        wc.hInstance     = GetModuleHandleW(NULL);
-        wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_3DFACE + 1);
-        wc.lpszClassName = L"VmwareWatchDlg";
-        if (!RegisterClassExW(&wc)) {
-            LogW(L"注册确认框失败 %lu", GetLastError());
-            return IDNO;
-        }
-        registered = TRUE;
-    }
+    DlgData d;
+    d.limit     = kDialogTimeoutMs;
+    d.lastShown = 0xFFFFFFFF;      /* 强制第一次进入时刷新 */
 
-    gDlgResult = IDNO;
-    gDlgStart  = GetTickCount();
-    gDlgLimit  = kDialogTimeoutMs;
+    TASKDIALOGCONFIG cfg;
+    ZeroMemory(&cfg, sizeof(cfg));
+    cfg.cbSize             = sizeof(cfg);
+    cfg.hInstance          = GetModuleHandleW(NULL);
+    cfg.pszWindowTitle     = L"VMware 托管启动器";
+    cfg.pszMainInstruction = L"VMware 主窗口已关闭，要完全退出吗？";
+    cfg.pszContent         = L"【是】 结束 VMware 全部进程（含运行中的虚拟机），并停止 4 个后台服务。\n"
+                             L"【否】 保持现状：托盘图标与后台服务继续运行，与原生行为一致。";
+    cfg.pszFooter          = L"剩余 20 秒，超时自动选择【是】";
+    cfg.pszMainIcon        = TD_INFORMATION_ICON;
+    cfg.dwCommonButtons    = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON;
+    cfg.nDefaultButton     = IDNO;                 /* 焦点默认在【否】，误按回车不会误清 */
+    cfg.pfCallback         = DlgProc;
+    cfg.lpCallbackData     = (LONG_PTR)&d;
+    cfg.dwFlags            = TDF_CALLBACK_TIMER |
+                             TDF_ALLOW_DIALOG_CANCELLATION |   /* Esc / 标题栏 X 都按【否】 */
+                             TDF_SIZE_TO_CONTENT;
 
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
-    RECT rc;
-    rc.left = 0; rc.top = 0;
-    rc.right  = Scaled(DLG_CX);
-    rc.bottom = Scaled(DLG_CY);
-    AdjustWindowRectEx(&rc, style, FALSE, 0);
-    int w   = rc.right - rc.left;
-    int hgt = rc.bottom - rc.top;
-
-    RECT wa;
-    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
-        wa.left = 0; wa.top = 0;
-        wa.right = GetSystemMetrics(SM_CXSCREEN);
-        wa.bottom = GetSystemMetrics(SM_CYSCREEN);
-    }
-    int x = wa.left + ((wa.right - wa.left) - w) / 2;
-    int y = wa.top  + ((wa.bottom - wa.top) - hgt) / 2;
-
-    gDlgWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                              L"VmwareWatchDlg", L"VMware 托管启动器", style,
-                              x, y, w, hgt,
-                              NULL, NULL, GetModuleHandleW(NULL), NULL);
-    if (!gDlgWnd) {
-        LogW(L"创建确认框失败 %lu", GetLastError());
-        return IDNO;
-    }
-
-    ShowWindow(gDlgWnd, SW_SHOW);
-    SetForegroundWindow(gDlgWnd);
-    SetTimer(gDlgWnd, DLG_ID_TIMER, 200, NULL);
-
-    MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-    return gDlgResult;
+    int btn = IDNO;
+    if (FAILED(TaskDialogIndirect(&cfg, &btn, NULL, NULL)) || btn == 0)
+        btn = IDNO;            /* 对话框本身起不来时按【否】处理，绝不误清 */
+    return btn;
 }
 
 /* ---------------------------- 收尾 ---------------------------- */

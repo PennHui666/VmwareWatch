@@ -1,0 +1,3 @@
+// 把 app.manifest 作为 RT_MANIFEST（类型 24，资源 ID 1）编进 exe。
+// 用法：rc /nologo /fo app.res app.rc  ->  链接时把 app.res 一起传进去。
+1 24 "app.manifest"

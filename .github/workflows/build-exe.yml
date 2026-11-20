@@ -27,16 +27,23 @@ jobs:
         with:
           arch: x64
 
+      - name: 编译资源（把 app.manifest 作为 RT_MANIFEST 编进去）
+        shell: cmd
+        run: |
+          rc /nologo /fo app.res app.rc
+          if not exist app.res (echo 清单资源编译失败 & exit /b 1)
+
       - name: 编译
         shell: cmd
         run: |
-          cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE /W3 vmware_watch.c /Fe:VmwareWatch.exe /link advapi32.lib shell32.lib user32.lib gdi32.lib shlwapi.lib
+          cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE /W3 vmware_watch.c app.res /Fe:VmwareWatch.exe /link /MANIFEST:NO advapi32.lib comctl32.lib shell32.lib user32.lib gdi32.lib shlwapi.lib
 
       - name: 检查产物
         shell: cmd
         run: |
           if not exist VmwareWatch.exe (echo 产物不存在 & exit /b 1)
           dir VmwareWatch.exe
+          findstr /C:"Microsoft.Windows.Common-Controls" VmwareWatch.exe >nul && echo 清单已嵌入 || (echo 清单缺失，TaskDialog 会加载失败 & exit /b 1)
 
       - name: 上传到运行产物（Artifacts）
         uses: actions/upload-artifact@v4

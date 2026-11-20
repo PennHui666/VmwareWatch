@@ -13,14 +13,17 @@ Win32 原生小程序，单文件 exe、常驻内存约 1 MB、无任何运行�
 主窗口消失时（点窗口 X）会弹确认框，20 秒倒计时：
 
 - **【是】** 结束全部 VMware 进程（含运行中的虚拟机）+ 停 4 个服务 + 自身退出
-- **【否】/ 超时** 保持原生行为：托盘和后台服务继续运行，程序继续监听
+- **【否】/ Esc / 标题栏 X** 保持原生行为：托盘和后台服务继续运行，程序继续监听
+- **20 秒不操作** 自动按【是】执行清理并退出（所以中途想反悔，随时点【否】）
 
 最小化主窗口**不会**触发确认框。
 
 ## 目录
 
 ```
-vmware_watch.c                    源码（唯一文件）
+vmware_watch.c                    源码
+app.manifest                      comctl32 v6 清单（TaskDialog 必需）
+app.rc                            把上面那份清单编成资源的脚本
 .github/workflows/build-exe.yml   在线编译：GitHub Actions 用 MSVC 出 exe
 ```
 
@@ -29,27 +32,30 @@ vmware_watch.c                    源码（唯一文件）
 ### 方式一：GitHub Actions（在线，推荐给没有编译环境的机器）
 
 1. 把本仓库推到 GitHub
-2. Actions 页面手动触发 `build-exe`
+2. Actions 页面手动触发 `build-exe`（或打 `v*` 标签，会额外发 Release）
 3. 运行结束后在 Artifacts 里下载 `VmwareWatch.exe`
 
-工作流已包含 `/manifestdependency` —— 少了它 `TaskDialogIndirect` 的入口找不到。
+工作流会先用 `rc.exe` 把 `app.manifest` 编进 exe，再检查产物里确实含
+`Microsoft.Windows.Common-Controls` —— 少了它 `TaskDialogIndirect` 会在加载期报“无法定位序数 345”。
 
 ### 方式二：MSVC 本地
 
 ```bat
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE vmware_watch.c /Fe:VmwareWatch.exe /link ^
-  advapi32.lib shell32.lib user32.lib gdi32.lib shlwapi.lib
+rc /nologo /fo app.res app.rc
+cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE vmware_watch.c app.res /Fe:VmwareWatch.exe /link ^
+  /MANIFEST:NO advapi32.lib comctl32.lib shell32.lib user32.lib gdi32.lib shlwapi.lib
 ```
 
 ### 方式三：MinGW-w64
 
 ```bat
-x86_64-w64-mingw32-gcc vmware_watch.c -O2 -mwindows -static ^
-  -o VmwareWatch.exe -ladvapi32 -lshell32 -luser32 -lgdi32 -lshlwapi
+x86_64-w64-mingw32-windres app.rc -O coff -o app.res
+x86_64-w64-mingw32-gcc vmware_watch.c app.res -O2 -mwindows -static ^
+  -o VmwareWatch.exe -lcomctl32 -ladvapi32 -lshell32 -luser32 -lgdi32 -lshlwapi
 ```
 
-不用 comctl32、也不用任何 manifest：确认框是自己画的窗口，只依赖 user32 + gdi32。
+Manifest 必须进 exe，否则 TaskDialog 不可用（这也是 MinGW 分支唯一多出来的一步）。
 
 ## 运行
 
