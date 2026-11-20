@@ -56,7 +56,13 @@ MinGW 分支还需额外用 `.rc` 资源把 comctl32 v6 清单嵌进 exe，否�
 
 双击运行，会弹一次 UAC（启停服务必须管理员，程序会自提权重开）。
 
-日志：`%TEMP%\VmwareWatch.log`
+日志：exe 同级目录下的 `log\` 子目录（自动创建），文件名带启动时间戳，每次启动一个文件：
+
+```
+D:\VmwareWatch\log\VmwareWatch_20261120_161230.log
+```
+
+若 exe 所在目录不可写（例如放在 `Program Files`），自动回退到 `%TEMP%`。每行带毫秒时间戳，逐行落盘。
 
 ## 可改的常量
 

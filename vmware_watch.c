@@ -20,7 +20,8 @@
  *   MinGW-w64 注意：除链接 -lcomctl32 外，还需用 .rc 资源把 comctl32 v6 清单
  *   嵌入 exe，否则 TaskDialogIndirect 入口不可用。
  *
- * 说明：日志写到 %TEMP%\VmwareWatch.log
+ * 说明：日志写到 exe 同级目录的 log\ 下，文件名带启动时间戳（每次启动一个文件）；
+ *       目录不可写时回退到 %TEMP%。
  * ==========================================================================*/
 
 #ifndef UNICODE
@@ -74,27 +75,73 @@ static const wchar_t* kProcs[] = {
 static const DWORD kDialogTimeoutMs = 20000;   /* 确认框倒计时 */
 static const DWORD kWaitWindowSec   = 120;     /* 等主窗口出现上限 */
 
-/* ---------------------------- 日志 ---------------------------- */
+/* ---------------------------- 日志 ----------------------------
+ * 位置：exe 同级目录下的 log\ 子目录（自动创建），文件按启动时间命名，
+ *       形如 log\VmwareWatch_20261120_161230.log —— 每次启动一个文件。
+ * 兜底：若 exe 所在目录不可写（例如放在 Program Files），自动回退到 %TEMP%。
+ * ------------------------------------------------------------ */
 
-static void LogW(const wchar_t* fmt, ...)
+#define LOGPATH_MAX 520
+
+static wchar_t gLogPath[LOGPATH_MAX] = { 0 };
+static FILE*   gLog = NULL;
+
+/* 拼一个带启动时间戳的日志文件名，写到 out */
+static void MakeLogName(wchar_t* out, size_t cap, const wchar_t* dir, const SYSTEMTIME* st)
 {
-    wchar_t path[MAX_PATH];
-    GetTempPathW(MAX_PATH, path);
-    wcscat_s(path, MAX_PATH, L"VmwareWatch.log");
+    swprintf_s(out, cap, L"%s\\VmwareWatch_%04d%02d%02d_%02d%02d%02d.log",
+               dir, st->wYear, st->wMonth, st->wDay, st->wHour, st->wMinute, st->wSecond);
+}
+
+/* 进程启动时调用一次；返回后 gLog 可能为 NULL（写不了日志时静默降级） */
+static void LogOpen(void)
+{
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+
+    /* 取 exe 所在目录 */
+    wchar_t exeDir[MAX_PATH];
+    wcscpy_s(exeDir, MAX_PATH, exePath);
+    wchar_t* slash = wcsrchr(exeDir, L'\\');
+    if (slash) *slash = L'\0';
+
+    wchar_t logDir[LOGPATH_MAX];
+    swprintf_s(logDir, LOGPATH_MAX, L"%s\\log", exeDir);
+    CreateDirectoryW(logDir, NULL);     /* 已存在则直接成功，失败也不致命 */
 
     SYSTEMTIME st;
     GetLocalTime(&st);
 
-    FILE* f = _wfopen(path, L"a, ccs=UTF-8");
-    if (!f) return;
+    MakeLogName(gLogPath, LOGPATH_MAX, logDir, &st);
+    gLog = _wfopen(gLogPath, L"a, ccs=UTF-8");
+    if (gLog) return;
 
-    fwprintf(f, L"%02d:%02d:%02d  ", st.wHour, st.wMinute, st.wSecond);
+    /* 回退：用户临时目录 */
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    wchar_t tmpDir[MAX_PATH];
+    wcscpy_s(tmpDir, MAX_PATH, tmp);
+    size_t len = wcslen(tmpDir);
+    if (len && tmpDir[len - 1] == L'\\') tmpDir[len - 1] = L'\0';
+
+    MakeLogName(gLogPath, LOGPATH_MAX, tmpDir, &st);
+    gLog = _wfopen(gLogPath, L"a, ccs=UTF-8");
+}
+
+static void LogW(const wchar_t* fmt, ...)
+{
+    if (!gLog) return;
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fwprintf(gLog, L"[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
     va_list ap;
     va_start(ap, fmt);
-    vfwprintf(f, fmt, ap);
+    vfwprintf(gLog, fmt, ap);
     va_end(ap);
-    fwprintf(f, L"\n");
-    fclose(f);
+    fwprintf(gLog, L"\n");
+    fflush(gLog);          /* 常驻程序，逐行落盘，异常退出也不丢关键记录 */
 }
 
 /* ---------------------------- 提权 / 单实例 ---------------------------- */
@@ -361,7 +408,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
         return 0;
     }
 
-    /* 2. 单实例 */
+    /* 2. 日志 + 单实例 */
+    LogOpen();
     HANDLE mutex = CreateMutexW(NULL, FALSE, L"VmwareWatch_Mutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         LogW(L"已有实例在运行，退出");
@@ -369,6 +417,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmd, int nShow)
     }
 
     LogW(L"========== 启动器启动 ==========");
+    LogW(L"日志文件: %s", gLogPath);
 
     /* 3. 启动阶段：服务 + 主程序 */
     if (FindPid(L"vmware.exe") != 0) {
