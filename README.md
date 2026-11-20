@@ -38,19 +38,18 @@ vmware_watch.c                    源码（唯一文件）
 
 ```bat
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-cl /O2 /MT /DUNICODE /D_UNICODE vmware_watch.c /Fe:VmwareWatch.exe /link ^
-  comctl32.lib advapi32.lib shell32.lib user32.lib shlwapi.lib ^
-  /manifestdependency:"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE vmware_watch.c /Fe:VmwareWatch.exe /link ^
+  advapi32.lib shell32.lib user32.lib shlwapi.lib
 ```
 
 ### 方式三：MinGW-w64
 
 ```bat
 x86_64-w64-mingw32-gcc vmware_watch.c -O2 -mwindows -static ^
-  -o VmwareWatch.exe -lcomctl32 -ladvapi32 -lshell32 -luser32 -lshlwapi
+  -o VmwareWatch.exe -ladvapi32 -lshell32 -luser32 -lshlwapi
 ```
 
-MinGW 分支还需额外用 `.rc` 资源把 comctl32 v6 清单嵌进 exe，否则 TaskDialog 不可用。
+不用 comctl32、也不用任何 manifest：确认框是自己画的窗口，只依赖 user32。
 
 ## 运行
 
