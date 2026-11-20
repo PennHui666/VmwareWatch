@@ -748,8 +748,8 @@ static int AskOptimize(int autoCnt, int disabledCnt, BOOL hasTray, BOOL* pDontAs
     cfg.cButtons                 = 2;
     cfg.nDefaultButton           = 101;
     cfg.pszExpandedInformation   = expand;
-    cfg.pszExpandedControlText   = L"查看细节";
-    cfg.pszCollapsedControlText  = L"收起细节";
+    cfg.pszExpandedControlText   = L"收起细节";   /* 展开后显示的链接文字 */
+    cfg.pszCollapsedControlText  = L"查看细节";   /* 收起时显示的链接文字 */
     cfg.pszVerificationText      = L"以后按这个决定自动处理，不再询问";
     cfg.dwFlags                  = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
 
