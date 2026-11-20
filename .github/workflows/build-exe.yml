@@ -5,8 +5,9 @@
 #   1. 仓库 Actions 标签页手动触发（或 push 到 main 自动跑）；
 #   2. 运行结束 -> Artifacts -> VmwareWatch-exe 下载。
 #
-# 注意：不同 runner 镜像里 Visual Studio 的安装路径（2022\Enterprise / 2022\Community /
-# 2022\Professional ...）会变，所以这里不写死路径，改用 vswhere 现场发现。
+# 说明：
+#   - 不写死 Visual Studio 安装路径（各镜像里 Enterprise/Community/Professional 都出现过）；
+#   - 用 ilammy/msvc-dev-cmd 自动定位并注入 MSVC 环境变量，之后直接可用 cl。
 
 name: build-exe
 
@@ -21,29 +22,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 定位 MSVC 环境
-        shell: pwsh
-        run: |
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          if (-not (Test-Path $vswhere)) { throw "vswhere.exe 不存在: $vswhere" }
+      - name: 配置 MSVC 环境
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
-          $vsPath = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -property installationPath
-          if (-not $vsPath) { throw "找不到带 C++ 工具链的 Visual Studio" }
-
-          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
-          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat 不存在: $vcvars" }
-
-          Write-Host "Visual Studio: $vsPath"
-          Write-Host "vcvars64: $vcvars"
-          "VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: MSVC 编译
+      - name: 确认编译器可用
         shell: cmd
         run: |
-          call "%VCVARS%"
+          where cl
+          cl 2>&1 | findstr /C:"Microsoft (R)"
+
+      - name: 编译
+        shell: cmd
+        run: |
           cl /O2 /MT /DUNICODE /D_UNICODE /W3 vmware_watch.c /Fe:VmwareWatch.exe /link comctl32.lib advapi32.lib shell32.lib user32.lib shlwapi.lib /manifestdependency:"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+
+      - name: 检查产物
+        shell: cmd
+        run: |
+          if not exist VmwareWatch.exe (echo 产物不存在 & exit /b 1)
+          dir VmwareWatch.exe
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
