@@ -23,12 +23,20 @@
  * 说明：日志写到 %TEMP%\VmwareWatch.log
  * ==========================================================================*/
 
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
 #define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601   /* TaskDialog / TaskDialogIndirect 需要 Vista+ */
+#endif
 
+/* WIN32_LEAN_AND_MEAN 会裁掉 shellapi.h，而 ShellExecuteExW 在那里，必须显式包含 */
 #include <windows.h>
+#include <shellapi.h>
 #include <commctrl.h>
 #include <tlhelp32.h>
 #include <shlwapi.h>
