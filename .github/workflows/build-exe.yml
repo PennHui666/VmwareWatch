@@ -30,7 +30,7 @@ jobs:
       - name: 编译
         shell: cmd
         run: |
-          cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE /W3 vmware_watch.c /Fe:VmwareWatch.exe /link advapi32.lib shell32.lib user32.lib shlwapi.lib
+          cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE /W3 vmware_watch.c /Fe:VmwareWatch.exe /link advapi32.lib shell32.lib user32.lib gdi32.lib shlwapi.lib
 
       - name: 检查产物
         shell: cmd

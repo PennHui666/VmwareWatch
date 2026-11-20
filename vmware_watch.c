@@ -13,13 +13,13 @@
  *
  *   MSVC (Developer Command Prompt)：
  *     cl /O2 /MT /utf-8 /DUNICODE /D_UNICODE /W3 vmware_watch.c /Fe:VmwareWatch.exe ^
- *       /link advapi32.lib shell32.lib user32.lib shlwapi.lib
+ *       /link advapi32.lib shell32.lib user32.lib gdi32.lib shlwapi.lib
  *
  *   MinGW-w64:
  *     x86_64-w64-mingw32-gcc vmware_watch.c -O2 -mwindows -static -o VmwareWatch.exe ^
- *       -ladvapi32 -lshell32 -luser32 -lshlwapi
+ *       -ladvapi32 -lshell32 -luser32 -lgdi32 -lshlwapi
  *
- *   两者都不再需要 comctl32 / manifest：确认框是纯 user32 自绘窗口。
+ *   两者都不再需要 comctl32 / manifest：确认框是纯 user32 + gdi32 自绘窗口。
  *
  * 说明：日志写到 exe 同级目录的 log\ 下，文件名带启动时间戳（每次启动一个文件）；
  *       目录不可写时回退到 %TEMP%。
@@ -32,6 +32,7 @@
 #define _UNICODE
 #endif
 #define WIN32_LEAN_AND_MEAN
+#define _CRT_SECURE_NO_WARNINGS   /* _wfopen 的 C4996 噪音，这里是有意使用 */
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601
 #endif
