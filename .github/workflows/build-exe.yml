@@ -1,9 +1,5 @@
-# 在线编译：推到 GitHub 后，Actions 在 windows-latest 虚拟机里用 MSVC 编出 exe，
-# 编译完在该次运行的 Artifacts 里下载 VmwareWatch.exe。
-#
-# 用法：
-#   1. 仓库 Actions 标签页手动触发（或 push 到 main 自动跑）；
-#   2. 运行结束 -> Artifacts -> VmwareWatch-exe 下载。
+# 在线编译：push 到 main（或手动触发）时在 windows-latest 用 MSVC 编出 VmwareWatch.exe；
+# 编完上传到该次运行的 Artifacts；如果是打标签推送（v*），额外发布一个 GitHub Release 并挂上 exe。
 #
 # 说明：
 #   - 不写死 Visual Studio 安装路径（各镜像里 Enterprise/Community/Professional 都出现过）；
@@ -15,6 +11,10 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write        # 发布 Release 需要
 
 jobs:
   build:
@@ -27,12 +27,6 @@ jobs:
         with:
           arch: x64
 
-      - name: 确认编译器可用
-        shell: cmd
-        run: |
-          where cl
-          cl 2>&1 | findstr /C:"Microsoft (R)"
-
       - name: 编译
         shell: cmd
         run: |
@@ -44,8 +38,15 @@ jobs:
           if not exist VmwareWatch.exe (echo 产物不存在 & exit /b 1)
           dir VmwareWatch.exe
 
-      - name: 上传产物
+      - name: 上传到运行产物（Artifacts）
         uses: actions/upload-artifact@v4
         with:
           name: VmwareWatch-exe
           path: VmwareWatch.exe
+
+      - name: 发布 Release（仅打标签时）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: VmwareWatch.exe
+          generate_release_notes: true
