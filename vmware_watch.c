@@ -67,9 +67,11 @@ static wchar_t gBackupPath[MAX_PATH] = { 0 };
 #define PREF_ASK     0    /* 还没决定过，启动时问一次 */
 #define PREF_MANUAL  1    /* 已授权：每次启动静默自愈 */
 #define PREF_KEEP    2    /* 明确不要动 */
+#define SERVICE_COUNT 4   /* 4 个常驻后台服务 */
 static int     gPrefState = PREF_ASK;
 static wchar_t gPrefDir[MAX_PATH] = { 0 };   /* 用户手工指定过的安装目录 */
 static int     gDisabledCount = 0;           /* 本轮扫描到的 Disabled 服务数 */
+static DWORD   gSvcType[SERVICE_COUNT];      /* 每个服务当前启动类型（供确认框展示） */
 
 /* 启动顺序（停止时自动逆序） */
 static const wchar_t* kServices[] = {
@@ -78,7 +80,6 @@ static const wchar_t* kServices[] = {
     L"VMware NAT Service",
     L"VMnetDHCP"
 };
-#define SERVICE_COUNT 4
 
 /* 收尾时需要结束的进程（先虚拟机，再界面，再托盘，最后服务进程） */
 static const wchar_t* kProcs[] = {
@@ -623,16 +624,19 @@ static int ScanServices(BOOL fix)
     for (int i = 0; i < SERVICE_COUNT; i++) {
         const wchar_t* n = kServices[i];
         DWORD t = SvcStartType(n);
+        gSvcType[i] = t;
 
         if (t == 0xFFFFFFFF) {
             LogW(L"  服务 %s 不存在或无法访问，跳过", n);
         } else if (t == SERVICE_AUTO_START) {
             autoCnt++;
             if (fix) {
-                if (SvcMakeManual(n))
+                if (SvcMakeManual(n)) {
+                    gSvcType[i] = SERVICE_DEMAND_START;
                     BackupAppend(L"服务 %s：原始启动类型=Auto，已改为 Manual（回滚: sc config \"%s\" start= auto）", n, n);
+                }
             } else {
-                LogW(L"  服务 %s 当前为 Auto（按偏好保持不改）", n);
+                LogW(L"  服务 %s 当前为 Auto（待纠正）", n);
             }
         } else if (t == SERVICE_DISABLED) {
             gDisabledCount++;
@@ -688,27 +692,44 @@ static BOOL RemoveTrayAutostart(void)
 /* 返回 101=按推荐处理 / 102=保持原样；*pDontAsk 带回「不再询问」勾选状态 */
 static int AskOptimize(int autoCnt, int disabledCnt, BOOL hasTray, BOOL* pDontAsk)
 {
-    wchar_t content[1200];
-    swprintf_s(content, 1200,
-        L"检测到以下可优化项：\n"
-        L"・4 个 VMware 后台服务中有 %d 个当前为「自动」启动，建议改为「手动」，只在本启动器拉起时运行\n"
-        L"・%s\n\n"
-        L"改为「手动」后，开机不再自动加载这些服务；日常通过桌面快捷方式启动完全不受影响。",
-        autoCnt,
-        hasTray ? L"检测到 vmware-tray.exe 开机自启项，建议移除，避免开机常驻托盘"
-                : L"开机自启项已为空（无需处理）");
+    (void)disabledCnt;   /* 禁用服务数已并入展开区的逐项列表 */
 
-    wchar_t expand[600];
-    if (disabledCnt > 0) {
-        swprintf_s(expand, 600,
-            L"另有 %d 个 VMware 服务处于「禁用」状态。禁用通常意味着主动关闭，本程序不会擅自启用，"
-            L"但 VMware 可能因此无法正常工作，需要时请自行改为「手动」。\n"
-            L"改动前原始值会记录到 service-backup.txt，可随时回滚。", disabledCnt);
+    const wchar_t* trayLine = hasTray
+        ? L"检测到 vmware-tray.exe 开机自启项，建议移除，避免开机常驻托盘"
+        : L"开机自启项已为空（无需处理）";
+
+    wchar_t content[1200];
+    if (autoCnt >= SERVICE_COUNT) {
+        swprintf_s(content, 1200,
+            L"检测到以下可优化项：\n"
+            L"・4 个 VMware 后台服务当前均为「自动」启动，建议改为「手动」，只在本启动器拉起时运行\n"
+            L"・%s\n\n"
+            L"改为「手动」后，开机不再自动加载这些服务；日常通过桌面快捷方式启动完全不受影响。",
+            trayLine);
     } else {
-        wcscpy_s(expand, 600,
-            L"改动前原始值会记录到 service-backup.txt，可随时照着文件里的命令回滚。\n"
-            L"选择「保持原样」则本次不做任何系统改动，服务仍在开机时自动启动。");
+        swprintf_s(content, 1200,
+            L"检测到以下可优化项：\n"
+            L"・4 个 VMware 后台服务中有 %d 个当前为「自动」启动，建议改为「手动」，只在本启动器拉起时运行\n"
+            L"・%s\n\n"
+            L"改为「手动」后，开机不再自动加载这些服务；日常通过桌面快捷方式启动完全不受影响。",
+            autoCnt, trayLine);
     }
+
+    /* 展开区：逐个列出服务当前类型，让用户看得见到底改什么 */
+    wchar_t expand[1100];
+    swprintf_s(expand, 1100, L"各服务当前启动类型：");
+    for (int i = 0; i < SERVICE_COUNT; i++) {
+        const wchar_t* t = (gSvcType[i] == SERVICE_AUTO_START)   ? L"自动（将被改为手动）"
+                         : (gSvcType[i] == SERVICE_DEMAND_START) ? L"手动（无需处理）"
+                         : (gSvcType[i] == SERVICE_DISABLED)     ? L"禁用（不会擅自启用）"
+                         :                                         L"不可访问（将跳过）";
+        wchar_t item[220];
+        swprintf_s(item, 220, L"\n・%s —— %s", kServices[i], t);
+        wcscat_s(expand, 1100, item);
+    }
+    wcscat_s(expand, 1100,
+        L"\n\n改动前的原始值会记录到 service-backup.txt，可照着文件里的命令回滚。"
+        L"\n选择「保持原样」则本次不做任何系统改动，服务仍在开机时自动启动。");
 
     TASKDIALOG_BUTTON b[] = {
         { 101, L"按推荐处理" },
