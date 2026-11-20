@@ -1,0 +1,19 @@
+备份时间：2026-11-20 17:05:05
+用途：把 VMware 4 个服务改手动、去掉托盘开机自启之前的原始状态记录
+
+=== 服务原始状态 ===
+VMAuthdService|StartMode=Auto|State=Stopped
+VMnetDHCP|StartMode=Auto|State=Stopped
+VMUSBArbService|StartMode=Auto|State=Stopped
+VMware NAT Service|StartMode=Auto|State=Stopped
+
+=== 开机自启项原始值 ===
+[HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run]
+vmware-tray.exe = "D:\VMware Workstation\vmware-tray.exe"
+
+=== 回滚办法 ===
+sc config VMAuthdService start= auto
+sc config VMUSBArbService start= auto
+sc config "VMware NAT Service" start= auto
+sc config VMnetDHCP start= auto
+reg add "HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run" /v vmware-tray.exe /t REG_SZ /d ""D:\VMware Workstation\vmware-tray.exe"" /f
