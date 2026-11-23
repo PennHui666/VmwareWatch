@@ -191,7 +191,7 @@ static void RelaunchElevated(void)
     sei.lpVerb       = L"runas";
     sei.lpFile       = exe;
     sei.lpParameters = L"";
-    sei.nShow        = SW_HIDE;
+    sei.nShow        = SW_SHOWNORMAL;   /* 不用 SW_HIDE：首个窗口会被这套启动标志左右显示状态 */
     ShellExecuteExW(&sei);
 }
 
@@ -500,6 +500,8 @@ static BOOL DetectInstallDir(void)
 }
 
 /* 让用户手工挑一次 vmware.exe，成功后记进偏好 */
+static void EnsureDialogOnScreen(void);   /* 定义在下方「对话框兜底定位」一节 */
+
 static BOOL AskPickInstallDir(void)
 {
     wchar_t file[MAX_PATH] = { 0 };
@@ -513,6 +515,7 @@ static BOOL AskPickInstallDir(void)
     ofn.lpstrTitle  = L"请选择 VMware 安装目录下的 vmware.exe";
     ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 
+    EnsureDialogOnScreen();
     if (!GetOpenFileNameW(&ofn)) { LogW(L"用户在文件选择框取消"); return FALSE; }
 
     wchar_t dir[MAX_PATH];
@@ -530,6 +533,96 @@ static BOOL AskPickInstallDir(void)
     SavePrefs();
     LogW(L"用户指定目录已记入偏好: %s", gPrefDir);
     return TRUE;
+}
+
+/* ---------------------------- 对话框兜底定位 ----------------------------
+ * 起因：快捷方式若被设成「运行方式：最小化」，资源管理器会以
+ * STARTF_USESHOWWINDOW + SW_SHOWMINIMIZED 启动本进程；而 Windows 有个老规矩——
+ * 进程**第一个**窗口的首次 ShowWindow 会被强制套用 STARTUPINFO 里的显示方式。
+ * 本程序平时没有任何可见窗口，于是 TaskDialog 就成了那个"第一个窗口"，
+ * 结果整块弹窗被塞到 -32000,-32000、只有 160x28 —— 表现为"最小化到任务栏"。
+ *
+ * 对策：弹框前起一个守护线程，等窗口出现后还原、再按显示器工作区居中。
+ * 顺带也解决"弹窗不在屏幕中央"的问题。
+ * ---------------------------------------------------------------------- */
+
+typedef struct {
+    DWORD pid;
+    HWND  hwnd;
+} FINDDLG;
+
+static BOOL CALLBACK FindDlgProc(HWND hwnd, LPARAM lp)
+{
+    FINDDLG* f = (FINDDLG*)lp;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != f->pid || !IsWindowVisible(hwnd)) return TRUE;
+
+    wchar_t cls[64];
+    GetClassNameW(hwnd, cls, 64);
+    if (_wcsicmp(cls, L"#32770") == 0) {
+        f->hwnd = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HWND FindTaskDialogWindow(void)
+{
+    FINDDLG f;
+    f.pid  = GetCurrentProcessId();
+    f.hwnd = NULL;
+    EnumWindows(FindDlgProc, (LPARAM)&f);
+    return f.hwnd;
+}
+
+static DWORD WINAPI FixupDialogThread(LPVOID param)
+{
+    (void)param;
+
+    HWND dlg = NULL;
+    for (int i = 0; i < 50 && !dlg; i++) {     /* 最多等 5 秒 */
+        Sleep(100);
+        dlg = FindTaskDialogWindow();
+    }
+    if (!dlg) return 0;
+
+    /* 1) 先把它从"最小化/隐藏"状态拉回正常 */
+    if (IsIconic(dlg))          ShowWindow(dlg, SW_RESTORE);
+    if (!IsWindowVisible(dlg))  ShowWindow(dlg, SW_SHOWNORMAL);
+
+    /* 2) 等布局完成（刚创建时拿到的是 0x0 或图标尺寸），再居中 */
+    RECT rc = { 0, 0, 0, 0 };
+    for (int i = 0; i < 20; i++) {
+        if (!IsWindow(dlg)) return 0;
+        GetWindowRect(dlg, &rc);
+        if ((rc.right - rc.left) > 80 && (rc.bottom - rc.top) > 60) break;
+        Sleep(50);
+    }
+
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w > 80 && h > 60) {
+        HMONITOR mon = MonitorFromWindow(dlg, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi;
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(mon, &mi)) {
+            int x = mi.rcWork.left + ((mi.rcWork.right  - mi.rcWork.left) - w) / 2;
+            int y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top)  - h) / 2;
+            SetWindowPos(dlg, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW);
+        }
+    }
+
+    SetForegroundWindow(dlg);
+    LogW(L"对话框已还原并居中（%d x %d）", w, h);
+    return 0;
+}
+
+/* 每个 TaskDialog / 文件选择框弹出前调用一次 */
+static void EnsureDialogOnScreen(void)
+{
+    HANDLE th = CreateThread(NULL, 0, FixupDialogThread, NULL, 0, NULL);
+    if (th) CloseHandle(th);
 }
 
 /* ---------------------------- 安装目录错误框 ---------------------------- */
@@ -557,6 +650,7 @@ static BOOL AskInstallDir(void)
     cfg.dwFlags            = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
 
     int btn = 0;
+    EnsureDialogOnScreen();
     HRESULT hr = TaskDialogIndirect(&cfg, &btn, NULL, NULL);
     if (FAILED(hr) || btn == 0 || btn == 102) return FALSE;
     return TRUE;
@@ -754,6 +848,7 @@ static int AskOptimize(int autoCnt, int disabledCnt, BOOL hasTray, BOOL* pDontAs
     cfg.dwFlags                  = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
 
     int btn = 0, checked = 0;
+    EnsureDialogOnScreen();
     HRESULT hr = TaskDialogIndirect(&cfg, &btn, NULL, &checked);
     if (pDontAsk) *pDontAsk = (checked != 0);
     if (FAILED(hr) || btn == 0) return 102;   /* 框起不来就当作用户不要改 */
@@ -832,35 +927,6 @@ static HWND FindMainWindow(void)
  * ------------------------------------------------------------------------------- */
 
 /* 在自身进程里找当前可见的 TaskDialog 窗口（类名 #32770） */
-typedef struct {
-    DWORD pid;
-    HWND  hwnd;
-} FINDDLG;
-
-static BOOL CALLBACK FindDlgProc(HWND hwnd, LPARAM lp)
-{
-    FINDDLG* f = (FINDDLG*)lp;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (pid != f->pid || !IsWindowVisible(hwnd)) return TRUE;
-
-    wchar_t cls[64];
-    GetClassNameW(hwnd, cls, 64);
-    if (_wcsicmp(cls, L"#32770") == 0) {
-        f->hwnd = hwnd;
-        return FALSE;
-    }
-    return TRUE;
-}
-
-static HWND FindTaskDialogWindow(void)
-{
-    FINDDLG f;
-    f.pid  = GetCurrentProcessId();
-    f.hwnd = NULL;
-    EnumWindows(FindDlgProc, (LPARAM)&f);
-    return f.hwnd;
-}
 
 /* 倒计时线程：先等对话框出现，到点给它发【是】 */
 static DWORD WINAPI DlgTimerThread(LPVOID param)
@@ -906,6 +972,7 @@ static int AskExit(void)
                              TDF_SIZE_TO_CONTENT;
 
     int btn = 0;
+    EnsureDialogOnScreen();
     HRESULT hr = TaskDialogIndirect(&cfg, &btn, NULL, NULL);
     if (FAILED(hr) || btn == 0)
         return IDNO;                          /* 对话框起不来就按【否】，绝不误清 */
